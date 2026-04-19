@@ -332,21 +332,27 @@ if 'main_df' not in st.session_state:
             st.session_state.main_df = pd.DataFrame(rekap)
 
 def get_summary():
-    model, tfidf = joblib.load('model_nb_aisyah.pkl'), joblib.load('tfidf_aisyah.pkl')
-    df = st.session_state.main_df
+    # Memuat model dan tfidf yang sudah dilatih
+    model = joblib.load('model_nb_aisyah.pkl')
+    tfidf = joblib.load('tfidf_aisyah.pkl')
+    
+    # Ambil data mentah (255 baris)
+    df = st.session_state.main_df.copy()
+    
+    # Tahap 1: Klasifikasikan SETIAP baris ulasan
+    # Gunakan kolom 'Umum' sebagai dasar prediksi Naive Bayes
+    df['text_clean'] = df['Umum'].apply(clean_text_fast)
+    df['prediksi_label'] = model.predict(tfidf.transform(df['text_clean']))
+    
+    # Tahap 2: Agregasi (Hitung jumlah orang yang positif/negatif per matkul)
+    # 1 dianggap Positif, 0 dianggap Negatif (sesuaikan dengan label modelmu)
     summary = df.groupby('Matkul').agg(
-        Jml_Suka=('Suka', lambda x: (x.str.strip() != "").sum()), 
-        Jml_Kendala=('Kendala', lambda x: (x.str.strip() != "").sum()), 
-        Teks_Umum=('Umum', lambda x: " ".join(x.astype(str)))
+        Ulasan_Positif=('prediksi_label', lambda x: (x == 1).sum()),
+        Ulasan_Negatif=('prediksi_label', lambda x: (x == 0).sum()),
+        Total_Responden=('Matkul', 'count')
     ).reset_index()
-    def judge(row):
-        if row['Jml_Suka'] > row['Jml_Kendala']: return 'Positif'
-        elif row['Jml_Kendala'] > row['Jml_Suka']: return 'Negatif'
-        else:
-            u = clean_text_fast(row['Teks_Umum'])
-            return 'Positif' if model.predict(tfidf.transform([u]))[0] == 1 else 'Negatif'
-    summary['Status_Umum'] = summary.apply(judge, axis=1)
-    return summary
+    
+    return summary, df
 
 # --- 3. LANDING PAGE ---
 if 'role_akses' not in st.session_state: 
@@ -473,98 +479,223 @@ else:
             st.markdown('</div>', unsafe_allow_html=True)
 
     elif menu == "Analisis Sentimen":
+        summary, raw_classified = get_summary() 
+    
         st.title("📊 Dashboard Analisis & Statistik")
         
+        # 1. METRIK UTAMA (Berdasarkan total suara per orang)
+        total_positif = (raw_classified['prediksi_label'] == 1).sum()
+        total_negatif = (raw_classified['prediksi_label'] == 0).sum()
+        n_total = len(raw_classified)
+    
         col1, col2, col3 = st.columns(3)
-        col1.metric("Total Matkul", len(summary))
-        col2.metric("Sentimen Positif", len(summary[summary['Status_Umum'] == 'Positif']))
-        col3.metric("Sentimen Negatif", len(summary[summary['Status_Umum'] == 'Negatif']))
+        col1.metric("Total Ulasan Masuk", len(raw_classified))
+        col2.metric("Total Suara Positif", total_positif)
+        col3.metric("Total Suara Negatif", total_negatif)
         
         st.divider()
         
-        st.subheader("Persentase Kategori Mata Kuliah")
-        fig_pie = px.pie(summary, names='Status_Umum', hole=0.4, color='Status_Umum', 
-                         color_discrete_map={'Positif':'#90a955','Negatif':'#dd2d4a'})
+        # 2. GRAFIK PIE (Persentase dari 255 data)
+        st.subheader("Persentase Sentimen Keseluruhan")
+        raw_classified['Label_Teks'] = raw_classified['prediksi_label'].map({1: 'Positif', 0: 'Negatif'})
+        
+        fig_pie = px.pie(raw_classified, names='Label_Teks', hole=0.4,
+                         color='Label_Teks',
+                         color_discrete_map={'Positif':'#90a955', 'Negatif':'#dd2d4a'})
         
         fig_pie.update_layout(
-    paper_bgcolor='rgba(0,0,0,0)', 
-    plot_bgcolor='rgba(0,0,0,0)',
-    font_color="white"            
-)
-
+            height=600, 
+            margin=dict(l=20, r=20, t=50, b=20),
+            paper_bgcolor='rgba(0,0,0,0)', 
+            plot_bgcolor='rgba(0,0,0,0)', 
+            font=dict(color="white", size=18),
+            legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="right", x=1.1)
+        )
+        st.plotly_chart(fig_pie, use_container_width=True, key="pie_utama") # Pakai Key agar unik
         
-        st.plotly_chart(fig_pie, use_container_width=True)
-
         st.divider()
 
-        st.subheader("📋 Daftar Seluruh Mata Kuliah")
+        # 3. GRAFIK BATANG (Sebaran per Matkul)
+        st.subheader("Sebaran Persepsi Mahasiswa per Mata Kuliah")
+        fig_bar = px.bar(summary, x='Matkul', y=['Ulasan_Positif', 'Ulasan_Negatif'], 
+                         color_discrete_map={'Ulasan_Positif':'#90a955', 'Ulasan_Negatif':'#dd2d4a'},
+                         barmode='group') 
         
-        tab1, tab2 = st.tabs(["👍 Semua Matkul Positif", "👎 Semua Matkul Negatif"])
+        fig_bar.update_layout(
+            height=700,
+            paper_bgcolor='rgba(0,0,0,0)', 
+            plot_bgcolor='rgba(0,0,0,0)', 
+            font=dict(color="white", size=14),
+            xaxis=dict(tickfont=dict(size=12)), # Ukuran teks nama matkul diperbesar
+            legend=dict(title_font_size=14, font_size=12)
+        )
+        st.plotly_chart(fig_bar, use_container_width=True, key="bar_utama")
         
-        with tab1:
-            df_pos = summary[summary['Status_Umum'] == 'Positif'].sort_values('Jml_Suka', ascending=False)
-            st.write(f"Ditemukan **{len(df_pos)}** mata kuliah dengan sentimen positif.")
-            fig_all_pos = px.bar(df_pos, x='Jml_Suka', y='Matkul', orientation='h',
-                                 color_discrete_sequence=['#90a955'], text_auto=True,
-                                 height=max(400, len(df_pos)*30))
-            fig_all_pos.update_layout(
-    paper_bgcolor='rgba(0,0,0,0)', 
-    plot_bgcolor='rgba(0,0,0,0)',
-    font_color="white",
-    xaxis=dict(showgrid=False), 
-    yaxis=dict(showgrid=False)
-)
-            st.plotly_chart(fig_all_pos, use_container_width=True)
-            
-        with tab2:
-            df_neg = summary[summary['Status_Umum'] == 'Negatif'].sort_values('Jml_Kendala', ascending=False)
-            st.write(f"Ditemukan **{len(df_neg)}** mata kuliah dengan sentimen negatif.")
-            fig_all_neg = px.bar(df_neg, x='Jml_Kendala', y='Matkul', orientation='h',
-                                 color_discrete_sequence=['#dd2d4a'], text_auto=True,
-                                 height=max(400, len(df_neg)*30))
-            
-            # 1. Membuat Grafik
-            fig_all_neg = px.bar(df_neg, x='Jml_Kendala', y='Matkul', orientation='h',
-                                 color_discrete_sequence=['#dd2d4a'], # Merah Coral agar menyala
-                                 text_auto=True,
-                                 height=max(400, len(df_neg)*30))
-            
-            # 2. MENGUBAH LATAR BELAKANG (Tambahkan Bagian Ini)
-            fig_all_neg.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', # Transparan mengikuti background web
-                plot_bgcolor='rgba(0,0,0,0)',  # Transparan agar tidak ada kotak hitam
-                font_color="white",            # Warna teks matkul jadi putih
-                xaxis=dict(showgrid=False),    # Hilangkan garis vertikal
-                yaxis=dict(showgrid=False),    # Hilangkan garis horizontal
-                margin=dict(l=20, r=20, t=20, b=20) # Mengatur jarak pinggir grafik
-            )
-            
-            st.plotly_chart(fig_all_neg, use_container_width=True)
-
         st.divider()
 
-        st.subheader("🔍 Input Ulasan Mata Kuliah")
+        # 5. DETAIL PER MATKUL & INPUT ULASAN BARU 
+        st.subheader("🔍 Detail & Input Ulasan Baru")
         pilihan = st.selectbox("Pilih Mata Kuliah", sorted(summary['Matkul'].unique()))
         res = summary[summary['Matkul'] == pilihan].iloc[0]
         
-        st.markdown(f"""<div style="background:white;padding:25px;border-radius:15px;border-left:10px solid {'#90a955' if res['Status_Umum']=='Positif' else '#dd2d4a'}; box-shadow: 0 4px 10px rgba(0,0,0,0.05);">
-                    <h1 style="margin:0;color:{'#90a955' if res['Status_Umum']=='Positif' else '#dd2d4a'}">{res['Status_Umum']}</h1>
-                    </div>""", unsafe_allow_html=True)
-        
-         # --- BAGIAN UPDATE: NOTIFIKASI & RESET KOLOM ---
+        # Tampilkan Detail Angka
+        c1, c2 = st.columns(2)
+        c1.info(f"Jumlah Mahasiswa Puas: {res['Ulasan_Positif']}")
+        c2.error(f"Jumlah Mahasiswa Mengeluh: {res['Ulasan_Negatif']}")
+
+
+    # --- 1. INISIALISASI---
+        if 'notif_sukses' not in st.session_state:
+            st.session_state.notif_sukses = None
+
         with st.expander(f"➕ Berikan Ulasan Baru untuk {pilihan}"):
-            with st.form("input_form", clear_on_submit=True): # Kolom bersih setelah pencet Kirim
-                s = st.text_input("Suka")
-                k = st.text_input("Kendala")
-                u = st.text_area("Umum")
+            # Tampilkan notifikasi jika ada pesan tersimpan
+            if st.session_state.notif_sukses:
+                st.success(st.session_state.notif_sukses)
+                if st.button("Tutup Pesan"):
+                    st.session_state.notif_sukses = None
+                    st.rerun()
+            
+            # --- 2. MULAI FORM ---
+            with st.form("input_form_cerdas", clear_on_submit=True):
+                st.write("Masukkan ulasan Anda mengenai mata kuliah ini:")
                 
-                if st.form_submit_button("Kirim"):
-                    if s.strip() == "" and k.strip() == "" and u.strip() == "":
-                        st.warning("Mohon isi ulasan sebelum mengirim.")
+                ulasan_suka = st.text_input("Apa hal yang paling Anda sukai?", 
+                                            placeholder="Contoh: Cara mengajar dosen asik")
+                
+                ulasan_kendala = st.text_input("Apa kendala atau hal yang kurang?", 
+                                               placeholder="Contoh: Materi terlalu cepat disampaikan")
+                
+                ulasan_umum = st.text_area("Berikan ulasan umum secara menyeluruh:", 
+                                           placeholder="Tulis pendapat Anda di sini...")
+                
+                # Tombol Kirim
+                submit_button = st.form_submit_button("Kirim Evaluasi")
+                
+                if submit_button:
+                    if ulasan_umum.strip() == "":
+                        st.warning("Mohon isi ulasan pada kolom 'Pendapat Umum'.")
                     else:
-                        new_data = pd.DataFrame([{'Matkul': pilihan, 'Suka': s, 'Kendala': k, 'Umum': u}])
+                        # 1. Proses Klasifikasi
+                        model_obj = joblib.load('model_nb_aisyah.pkl')
+                        tfidf_obj = joblib.load('tfidf_aisyah.pkl')
+                        u_clean = clean_text_fast(ulasan_umum)
+                        pred = model_obj.predict(tfidf_obj.transform([u_clean]))[0]
+                        label = "POSITIF 👍" if pred == 1 else "NEGATIF 👎"
+                        
+                        # 2. Definisikan Data Baru 
+                        new_data = pd.DataFrame([{
+                            'Matkul': pilihan, 
+                            'Suka': ulasan_suka if ulasan_suka else '-', 
+                            'Kendala': ulasan_kendala if ulasan_kendala else '-', 
+                            'Umum': ulasan_umum
+                        }])
+                        
+                        # 3. Update Dataframe Utama
                         st.session_state.main_df = pd.concat([st.session_state.main_df, new_data], ignore_index=True)
-                        st.success("✅ ULASAN TERKIRIM!")
+                        
+                        # 4. Simpan Pesan dan Refresh
+                        st.session_state.notif_sukses = f"✅ Berhasil! Ulasan untuk {pilihan} terdeteksi {label}"
+                        st.rerun()
+
+# --- ANALISIS 3 ASPEK UTAMA (FOKUS PERSENTASE) ---
+        st.divider()
+        st.subheader("🌐 Analisis Perbandingan Aspek Seluruh Mata Kuliah")
+        
+        # Kamus Kata Kunci 
+        kamus_final_100 = {
+            'Materi & Kesulitan': [
+                'materi', 'modul', 'paham', 'sulit', 'susah', 'berat', 'gampang', 
+                'rumus', 'teori', 'pembahasan', 'isi', 'kurikulum', 'topik', 'pelajaran', 
+                'konsep', 'ilmu', 'bobot', 'menantang', 'kompleks', 'abstrak', 
+                'kalkulus', 'logika', 'mendasar', 'bermanfaat', 'nyambung'
+            ],
+            'Metode & Praktik': [
+                'praktek', 'praktikum', 'coding', 'contoh', 'langsung', 'lab', 
+                'komputer', 'implementasi', 'nyata', 'metode', 'penerapan', 'praktekan', 
+                'dipraktekkan', 'membangun', 'proyek', 'kelompok', 'cerita', 'dunia kerja', 
+                'industri', 'profesi', 'studi kasus', 'ngoding', 'software', 'aplikasi', 'mobile', 'sql', 'bosan'
+            ],
+            'Dosen & Penyampaian': [
+                'dosen', 'ajar', 'jelas', 'suara', 'sampaikan', 'cara mengajar', 
+                'bapak', 'ibu', 'beliau', 'menerangkan', 'komunikasi', 'menjelaskan', 
+                'asik', 'enjoy', 'nyaman', 'interaksi', 'cerita', 'pengalaman', 'sharing', 
+                'baik', 'sabar', 'kompeten', 'menyenangkan', 'penerangan', 'penyampaiannya', 
+                'ceramah', 'seru', 'disiplin', 'jarang', 'pelan' 
+            ]
+        }
+
+        data_rekap_100 = []
+        for m_nama in sorted(raw_classified['Matkul'].unique()):
+            df_m = raw_classified[raw_classified['Matkul'] == m_nama]
+            
+            for asp_nama, kws in kamus_final_100.items():
+                pattern = '|'.join(kws)
+                mask = df_m['Umum'].str.contains(pattern, case=False, na=False)
+                df_aspek = df_m[mask]
+                
+                total_ulasan_aspek = len(df_aspek)
+                
+                if total_ulasan_aspek > 0:
+                    jml_positif = (df_aspek['prediksi_label'] == 1).sum()
+                    persen_puas = (jml_positif / total_ulasan_aspek) * 100
+                    persen_keluhan = 100 - persen_puas # Sisanya otomatis jadi negatif
+                else:
+                    # Jika tidak ada yang bahas aspek ini, kita beri nilai 0 agar tidak kosong
+                    persen_puas = 0
+                    persen_keluhan = 0
+                
+                # Masukkan data positif
+                data_rekap_100.append({
+                    'Mata Kuliah': m_nama,
+                    'Aspek': asp_nama,
+                    'Persentase': persen_puas,
+                    'Sentimen': 'Pujian (Positif)'
+                })
+                # Masukkan data negatif
+                data_rekap_100.append({
+                    'Mata Kuliah': m_nama,
+                    'Aspek': asp_nama,
+                    'Persentase': persen_keluhan,
+                    'Sentimen': 'Keluhan (Negatif)'
+                })
+
+        df_full_100 = pd.DataFrame(data_rekap_100)
+        df_full_100 = df_full_100.sort_values(by=['Mata Kuliah'], ascending=True)
+
+        # Visualisasi Stacked Bar yang dibagi per kolom Aspek (Facet)
+        fig_full = px.bar(
+            df_full_100, 
+            x='Persentase', 
+            y='Mata Kuliah', 
+            color='Sentimen',
+            facet_col='Aspek', # Membagi layar jadi 3 kolom (Materi, Metode, Dosen)
+            orientation='h',
+            barmode='stack', 
+            height=1200,
+            # Warna Hijau/Biru untuk positif, Merah untuk negatif
+            color_discrete_map={
+                'Pujian (Positif)': '#219ebc', # Biru 
+                'Keluhan (Negatif)': '#ef233c'  # Merah
+            },
+            text_auto='.0f'
+        )
+
+        fig_full.update_yaxes(autorange="reversed")
+        fig_full.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', 
+            plot_bgcolor='rgba(0,0,0,0)', 
+            font_color="white",
+            xaxis_title="Persentase (%)",
+            yaxis_title="",
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5)
+        )
+
+        # Menghapus teks "Aspek=" di atas tiap kolom agar lebih bersih
+        fig_full.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+
+        st.plotly_chart(fig_full, use_container_width=True, key="grafik_full_100_percent")
+
   
     elif menu == "Data Master (Admin)":
         st.title("⚙️ Manajemen Data Master")
@@ -581,7 +712,7 @@ else:
 
         st.divider()
 
-        # 2. Tabel Editor (Data diambil dari memori)
+        # 2. Tabel Editor 
         edited_df = st.data_editor(st.session_state.main_df, num_rows="dynamic", use_container_width=True, key="master_edit")
         
         # 3. TOMBOL SIMPAN PERMANEN (WAJIB ADA)
@@ -636,4 +767,36 @@ else:
         # ------------------------------------------
 
         st.divider()
-        st.write("Aisyah Qurrata Ayun - Informatika Adzkia.")
+        # --- FOOTER (IDENTITAS PENGEMBANG) ---
+# Kode ini diletakkan di luar semua blok 'if menu ==' agar selalu muncul
+st.markdown("""
+    <style>
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        background-color: rgba(0, 20, 39, 0.9); /* Transparan gelap biar senada background */
+        color: #f1f1f1;
+        text-align: center;
+        padding: 15px 0;
+        font-family: 'Poppins', sans-serif;
+        border-top: 2px solid #598392;
+        z-index: 999;
+    }
+    .footer b {
+        color: #aec3b0; /* Warna aksen untuk nama kamu */
+        font-size: 1.1rem;
+    }
+    .footer p {
+        margin: 0;
+        font-size: 1rem;
+    }
+    </style>
+    
+    <div class="footer">
+        <p><b>Sistem Analisis Sentimen Evaluasi Mata Kuliah</b></p>
+        <p>Dikembangkan oleh: <b>Aisyah Qurrata Ayun</b> (Informatika Adzkia)</p>
+        <p style='font-size: 0.8rem; color: #888;'>&copy; 2026 Tugas Akhir - Universitas Adzkia</p>
+    </div>
+""", unsafe_allow_html=True)
